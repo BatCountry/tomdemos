@@ -27,9 +27,6 @@ def main(harness: Harness):
     # random number generator from numpy because reasons
     rng = np.random.default_rng()
 
-    # pygame frame timer
-    clock = pygame.Clock()
-
     # virtual screen - we want chonky pixels
     width = 160
     height = 120
