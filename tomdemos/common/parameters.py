@@ -1,5 +1,9 @@
+import operator
+
 from dataclasses import dataclass
 from typing import Any, Callable, Generator
+
+import numpy as np
 
 # in python 3.15 we're getting a `sentinel` type in `builtins` which is for exactly this
 UNSET = object()
@@ -24,6 +28,21 @@ class Parameter:
     # Returns True if parameter is valid
     validator: Callable[[Any], bool] | None = None
 
+    _dirty: bool = False
+
+    # Marker for labelling a value as changed and needing reprocessing
+    def dirty(self):
+        self._dirty = True
+
+    def is_dirty(self):
+        return self._dirty
+
+    def clean(self):
+        self._dirty = False
+
+    def accepts(self, value: Any) -> bool:
+        return self.validator is None or self.validator(value)
+
     def __post_init__(self):
         if not self.name:
             raise ValueError("`name` must not be an empty string.")
@@ -32,6 +51,36 @@ class Parameter:
         # if they want a default value to reset to (reset button is disabled in ui if default isn't set)
         # but don't want to define the default and the value both explicitly for tidiness
         self.value = self.value if self.value is not UNSET else self.default
+
+    def __int__(self):
+        return int(self.value)
+
+    def __index__(self):
+        return int(self.value)
+
+    def __float__(self):
+        return float(self.value)
+
+    def __str__(self):
+        return str(self.value)
+
+    def __iter__(self):
+        return iter(self.value)
+
+    def __add__(self, other):
+        return operator.add(self.value, other)
+
+    def __sub__(self, other):
+        return operator.add(self.value, other)
+
+    def __mul__(self, other):
+        return operator.mul(self.value, other)
+
+    def __truediv__(self, other):
+        return operator.mul(self.value, other)
+
+    def __array__(self):
+        return np.array([self.value,])
 
 
 class Parameters:
@@ -62,16 +111,18 @@ class Parameters:
     def __getitem__(self, which):
         return self._parameters[which].value
 
+    def get_parameter(self, name: str) -> Parameter:
+        return self._parameters[name]
+
     # necessary, otherwise [] returns a read-only value
     def __setitem__(self, key, value):
-        if self._parameters[key].validator is not None:
-            if not self._parameters[key].validator(value): # pyright: ignore[reportOptionalCall] # pylance is fucking stupid and the devs should feel bad about their ability to write code
-                raise ValueError(f'{value} did not pass the validator for {key}')
+        if not self._parameters[key].accepts(value):
+            raise ValueError(f'{value} did not pass the validator for {key}')
         self._parameters[key].value = value
 
     # lets me use dot to access, like params.monkey_count
     def __getattr__(self, name: str) -> Any:
         try:
-            return self.__dict__['_parameters'][name].value
+            return self.__dict__['_parameters'][name]
         except KeyError:
             raise AttributeError(name)

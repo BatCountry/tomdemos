@@ -69,22 +69,10 @@ PARAMETERS = Parameters([
 ])
 
 
-def main(harness: Harness):
-    Application.create()
-    window = ParametersWindow(PARAMETERS)
-    harness.start_window(window)
-
-    def kernel_convolve(intensity_map: NDArray) -> NDArray:
-        windows = sliding_window_view(np.pad(intensity_map, 1), (3,3))
-        return np.sum(windows * PARAMETERS.kernel, axis=(-2, -1))
-
-
-    # random number generator from numpy because reasons
-    rng = np.random.default_rng()
-
+def build_palette() -> np.ndarray[tuple[int, int, int], np.dtype[np.uint8]]:
     # separate out the crap here
-    colors = np.array([color for color, weight in PARAMETERS.color_weights])
-    weights = np.array([weight for color, weight in PARAMETERS.color_weights])
+    colors = np.array([color for color, _ in PARAMETERS.color_weights])
+    weights = np.array([weight for _, weight in PARAMETERS.color_weights])
 
     # this turns the collection of percentages into the start positions of those colors across the range from 0.0 to 1.0
     positions = np.cumsum(weights) - weights
@@ -102,6 +90,23 @@ def main(harness: Harness):
             colors[:, channel])
         for channel in range(3)
     ]).astype(np.uint8)
+    return palette
+
+
+def main(harness: Harness):
+    Application.create()
+    window = ParametersWindow(PARAMETERS)
+    harness.start_window(window)
+
+    def kernel_convolve(intensity_map: NDArray) -> NDArray:
+        windows = sliding_window_view(np.pad(intensity_map, 1), (3,3))
+        return np.sum(windows * PARAMETERS.kernel, axis=(-2, -1))
+
+
+    # random number generator from numpy because reasons
+    rng = np.random.default_rng()
+
+    palette = build_palette()
 
     # the actual fire field to store a single float intensity value per position
     # everything happens on the y axis, so we're putting height in the first field
@@ -114,6 +119,10 @@ def main(harness: Harness):
     # Do fire
     # we're waiting until we hit the next frame timing to hit a 30fps target framerate
     while harness.tick(30):
+        if PARAMETERS.color_weights.is_dirty():
+            palette = build_palette()
+            PARAMETERS.color_weights.clean()
+
         # if we've changed the dimensions in the parameters window, we have to regen the surface and the intensity map
         if intensity_map_hw != (PARAMETERS.height, PARAMETERS.width):
             intensity_map = np.zeros((PARAMETERS.height+1, PARAMETERS.width))
