@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QLabel,
     QMainWindow,
+    QPushButton,
     QLineEdit,
     QScrollArea,
     QTableView,
@@ -44,7 +45,7 @@ def color_invalid_field(control: QLineEdit, param: Parameter, parser: Callable[[
         control.setStyleSheet(INVALID_FIELD_STYLE)
         return
 
-    value = parser(control.text())
+    value = param.apply_pre_validator(parser(control.text()))
     if not param.accepts(value):
         control.setStyleSheet(INVALID_FIELD_STYLE)
         return
@@ -57,12 +58,13 @@ def color_invalid_table(control: QTableView, invalid: bool) -> None:
 
 
 def single_field_write(control: QLineEdit, param: Parameter, parser: Callable[[str], Any]) -> None:
-    value = parser(control.text())
+    value = param.apply_pre_validator(parser(control.text()))
 
     if not param.accepts(value):
         return
 
     param.value = value
+    control.setText(str(value))
     param.dirty()
 
 
@@ -217,16 +219,61 @@ class TableModel(QAbstractTableModel):
         return type(template)(raw_value.strip())
 
     @classmethod
-    def _freeze_table_data(cls, template: Any, rows: list[list[Any]]) -> Any:
-        frozen_rows = []
-        for template_row, row in zip(template, rows, strict=True):
-            frozen_row = [
-                cls._coerce_value(template_cell, cell)
-                for template_cell, cell in zip(template_row, row, strict=True)
-            ]
-            frozen_rows.append(tuple(frozen_row) if type(template_row) is tuple else frozen_row)
+    def _freeze_row(cls, template_row: Any, row: list[Any]) -> Any:
+        frozen_row = [
+            cls._coerce_value(template_cell, cell)
+            for template_cell, cell in zip(template_row, row, strict=True)
+        ]
+        return tuple(frozen_row) if type(template_row) is tuple else frozen_row
 
-        return tuple(frozen_rows) if type(template) is tuple else frozen_rows
+    @classmethod
+    def _freeze_table_data(cls, template: Any, rows: list[list[Any]]) -> Any:
+        if type(template) is tuple:
+            return tuple(
+                cls._freeze_row(template_row, row)
+                for template_row, row in zip(template, rows, strict=True)
+            )
+
+        template_row = template[0] if template else (rows[0] if rows else [])
+        return [
+            cls._freeze_row(template[index] if index < len(template) else template_row, row)
+            for index, row in enumerate(rows)
+        ]
+
+    def append_row(self) -> bool:
+        if self._param.row_factory is None:
+            return False
+
+        new_row = self._param.apply_pre_validator(self._copy_cell_value(self._param.row_factory()))
+
+        if any(not self._param.accepts_column(column, value) for column, value in enumerate(new_row)):
+            return False
+
+        candidate_rows = [self._copy_cell_value(row) for row in self._working_data]
+        candidate_rows.append(new_row)
+
+        try:
+            candidate_value = self._freeze_table_data(self._param.value, candidate_rows)
+        except (TypeError, ValueError):
+            return False
+
+        if not self._param.accepts(candidate_value):
+            return False
+
+        insert_at = len(self._working_data)
+        committed_rows = self._mutable_table_data(candidate_value)
+
+        self.beginInsertRows(QModelIndex(), insert_at, insert_at)
+        self._working_data = self._mutable_table_data(candidate_value)
+        self._committed_data = committed_rows
+        self.endInsertRows()
+
+        self._param.value = candidate_value
+        self._dirty_cells.clear()
+        self._invalid_cells.clear()
+        self._param.dirty()
+        self._refresh_invalid_style()
+        return True
 
     def _refresh_invalid_style(self) -> None:
         if self._set_invalid_style is not None:
@@ -264,6 +311,15 @@ class TableModel(QAbstractTableModel):
 
         return None
 
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = int(Qt.ItemDataRole.DisplayRole)):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+
+        if orientation == Qt.Orientation.Horizontal:
+            return self._param.headers.columns[section] if section < len(self._param.headers.columns) else None
+
+        return self._param.headers.rows[section] if section < len(self._param.headers.rows) else None
+
     def flags(self, index):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
@@ -290,13 +346,21 @@ class TableModel(QAbstractTableModel):
             self.dataChanged.emit(index, index, [Qt.ItemDataRole.BackgroundRole])
             return False
 
-        self._invalid_cells.discard(cell)
+        parsed_value = self._param.apply_pre_validator(parsed_value)
         self._working_data[row][column] = parsed_value
 
         if parsed_value == self._committed_data[row][column]:
             self._dirty_cells.discard(cell)
         else:
             self._dirty_cells.add(cell)
+
+        if not self._param.accepts_column(column, parsed_value):
+            self._invalid_cells.add(cell)
+            self._refresh_invalid_style()
+            self._emit_all_data_changed()
+            return True
+
+        self._invalid_cells.discard(cell)
 
         candidate_value = self._freeze_table_data(self._param.value, self._working_data)
         if self._param.accepts(candidate_value):
@@ -341,20 +405,27 @@ class ParametersWindow(QMainWindow):
 
         for param in self.parameters:
             new_control: QWidget
+            add_row_button: QPushButton | None = None
 
             match type(param.value):
                 case builtins.list | builtins.tuple:
                     table_control = QTableView()
+                    table_model = TableModel(
+                        param,
+                        lambda invalid, control=table_control: color_invalid_table(control, invalid),
+                    )
                     table_control.setModel(
-                        TableModel(
-                            param,
-                            lambda invalid, control=table_control: color_invalid_table(control, invalid),
-                        )
+                        table_model
                     )
                     table_control.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
                     table_control.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
                     table_control.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
                     table_control.adjustSize()
+                    if param.row_factory is not None:
+                        add_row_button = QPushButton("+ Row")
+                        add_row_button.clicked.connect(
+                            lambda _checked=False, model=table_model: model.append_row()
+                        )
                     new_control = table_control
 
                 case builtins.int | np.uint8 | np.uint16 | np.uint32 | np.uint64:
@@ -403,6 +474,8 @@ class ParametersWindow(QMainWindow):
                 new_layout.addWidget(new_label)
 
             new_layout.addWidget(new_control)
+            if add_row_button is not None:
+                new_layout.addWidget(add_row_button)
             new_container.setLayout(new_layout)
             new_layout.activate()
             new_container.adjustSize()

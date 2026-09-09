@@ -1,12 +1,21 @@
 import operator
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Generator
 
 import numpy as np
 
 # in python 3.15 we're getting a `sentinel` type in `builtins` which is for exactly this
 UNSET = object()
+
+
+@dataclass
+class Headers:
+    """
+    Uses the header columns and label rows until consumed, leaves the rest unlabeled
+    """
+    columns: list[str] = field(default_factory=list)
+    rows: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -25,8 +34,20 @@ class Parameter:
     # Description for display in a graphical editor, otherwise pointless
     description: str = ""
 
+    # Labels for columns or rows {"columns": ["foo", "bar"], "rows": ["primus", "secundus"]}
+    headers: Headers = field(default_factory=Headers)
+
+    # Optional transform applied before validator checks
+    pre_validator: Callable[[Any], Any] | None = None
+
     # Returns True if parameter is valid
     validator: Callable[[Any], bool] | None = None
+
+    # Optional per-column validators for table parameters, with an optional "default" fallback
+    column_validators: dict[int | str, Callable[[Any], bool]] = field(default_factory=dict)
+
+    # Optional factory for appending a new row to variable-length table parameters
+    row_factory: Callable[[], Any] | None = None
 
     _dirty: bool = False
 
@@ -40,12 +61,35 @@ class Parameter:
     def clean(self):
         self._dirty = False
 
+    def apply_pre_validator(self, value: Any) -> Any:
+        if self.pre_validator is None:
+            return value
+
+        if type(value) is list:
+            return [self.apply_pre_validator(item) for item in value]
+
+        if type(value) is tuple:
+            return tuple(self.apply_pre_validator(item) for item in value)
+
+        return self.pre_validator(value)
+
     def accepts(self, value: Any) -> bool:
+        value = self.apply_pre_validator(value)
         return self.validator is None or self.validator(value)
+
+    def accepts_column(self, column: int, value: Any) -> bool:
+        value = self.apply_pre_validator(value)
+        validator = self.column_validators.get(column)
+        if validator is None:
+            validator = self.column_validators.get("default")
+        return validator is None or validator(value)
 
     def __post_init__(self):
         if not self.name:
             raise ValueError("`name` must not be an empty string.")
+        
+        if self.headers and type(self.headers) is dict:
+            self.headers = Headers(**self.headers) # type: ignore
 
         # convenience mechanism so that a user of the code can just do {"name": "monkey_count", "default": 13}
         # if they want a default value to reset to (reset button is disabled in ui if default isn't set)
@@ -54,6 +98,24 @@ class Parameter:
 
     def __int__(self):
         return int(self.value)
+
+    def __lt__(self, other):
+        try:
+            return self.value < other.value
+        except AttributeError:
+            return self.value < other
+
+    def __gt__(self, other):
+        try:
+            return self.value > other.value
+        except AttributeError:
+            return self.value > other
+
+    def __eq__(self, other):
+        try:
+            return self.value == other.value
+        except AttributeError:
+            return self.value == other
 
     def __index__(self):
         return int(self.value)
@@ -68,16 +130,28 @@ class Parameter:
         return iter(self.value)
 
     def __add__(self, other):
-        return operator.add(self.value, other)
+        try:
+            return operator.add(self.value, other.value)
+        except AttributeError:
+            return operator.add(self.value, other)
 
     def __sub__(self, other):
-        return operator.add(self.value, other)
+        try:
+            return operator.sub(self.value, other.value)
+        except AttributeError:
+            return operator.sub(self.value, other)
 
     def __mul__(self, other):
-        return operator.mul(self.value, other)
+        try:
+            return operator.mul(self.value, other.value)
+        except AttributeError:
+            return operator.mul(self.value, other)
 
     def __truediv__(self, other):
-        return operator.mul(self.value, other)
+        try:
+            return operator.truediv(self.value, other.value)
+        except AttributeError:
+            return operator.truediv(self.value, other)
 
     def __array__(self):
         return np.array([self.value,])
@@ -116,6 +190,7 @@ class Parameters:
 
     # necessary, otherwise [] returns a read-only value
     def __setitem__(self, key, value):
+        value = self._parameters[key].apply_pre_validator(value)
         if not self._parameters[key].accepts(value):
             raise ValueError(f'{value} did not pass the validator for {key}')
         self._parameters[key].value = value

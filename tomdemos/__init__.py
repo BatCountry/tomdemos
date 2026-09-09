@@ -2,9 +2,11 @@
 from tomdemos.demos.fire import main as fire
 from tomdemos.demos.fire2 import main as fire2
 from tomdemos.demos.multiwin import main as multiwin
+from tomdemos.demos.plasma import main as plasma
 
 __all__ = [
     'fire',
     'fire2',
+    'plasma',
     'multiwin',
 ]
