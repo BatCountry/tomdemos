@@ -2,7 +2,8 @@ import builtins
 from typing import Any, Callable
 
 import numpy as np
-from PySide6.QtGui import QColor, QDoubleValidator, QIntValidator
+from PySide6.QtGui import QColor, QDoubleValidator, QIntValidator, QKeySequence
+
 from PySide6.QtCore import Qt
 
 from PySide6.QtWidgets import QWidget
@@ -15,7 +16,8 @@ from PySide6.QtCore import (
 
 from PySide6.QtWidgets import (
     QApplication,
-    QAbstractScrollArea,
+    QAbstractItemView,
+    QAbstractScrollArea,    
     QLabel,
     QMainWindow,
     QPushButton,
@@ -66,6 +68,78 @@ def single_field_write(control: QLineEdit, param: Parameter, parser: Callable[[s
     param.value = value
     control.setText(str(value))
     param.dirty()
+
+
+class ClipboardTableView(QTableView):
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            return
+
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.paste_selection()
+            return
+
+        super().keyPressEvent(event)
+
+    def copy_selection(self) -> None:
+        indexes = self.selectedIndexes()
+        if not indexes:
+            current = self.currentIndex()
+            if not current.isValid():
+                return
+            indexes = [current]
+
+        cells = {
+            (index.row(), index.column()): str(index.data(Qt.ItemDataRole.DisplayRole))
+            for index in indexes
+        }
+        min_row = min(row for row, _ in cells)
+        max_row = max(row for row, _ in cells)
+        min_column = min(column for _, column in cells)
+        max_column = max(column for _, column in cells)
+
+        text = "\n".join(
+            "\t".join(
+                cells.get((row, column), "")
+                for column in range(min_column, max_column + 1)
+            )
+            for row in range(min_row, max_row + 1)
+        )
+        QApplication.clipboard().setText(text)
+
+    def paste_selection(self) -> None:
+        indexes = self.selectedIndexes()
+        if indexes:
+            start_row = min(index.row() for index in indexes)
+            start_column = min(index.column() for index in indexes)
+        else:
+            current = self.currentIndex()
+            if not current.isValid():
+                return
+            start_row = current.row()
+            start_column = current.column()
+
+        rows = [line.split("\t") for line in QApplication.clipboard().text().splitlines()]
+        if not rows:
+            return
+
+        model = self.model()
+        for row_offset, values in enumerate(rows):
+            row = start_row + row_offset
+            if row >= model.rowCount():
+                break
+
+            for column_offset, value in enumerate(values):
+                column = start_column + column_offset
+                if column >= model.columnCount():
+                    break
+
+                model.setData(
+                    model.index(row, column),
+                    value,
+                    Qt.ItemDataRole.EditRole,
+                )
 
 
 class TableModel(QAbstractTableModel):
@@ -409,7 +483,8 @@ class ParametersWindow(QMainWindow):
 
             match type(param.value):
                 case builtins.list | builtins.tuple:
-                    table_control = QTableView()
+                    table_control = ClipboardTableView()
+                    table_control.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
                     table_model = TableModel(
                         param,
                         lambda invalid, control=table_control: color_invalid_table(control, invalid),
@@ -466,10 +541,13 @@ class ParametersWindow(QMainWindow):
             new_container = QWidget()
 
             new_layout = QVBoxLayout()
-            new_layout.addWidget(QLabel(param.name))
+            name_label = QLabel(param.name)
+            name_label.setTextInteractionFlags((Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard))
+            new_layout.addWidget(name_label)
             if param.description:
                 new_label = QLabel(param.description)
                 new_label.setWordWrap(True)
+                new_label.setTextInteractionFlags((Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard))
                 new_label.setMaximumWidth(MAX_LABEL_WIDTH)
                 new_layout.addWidget(new_label)
 
